@@ -130,3 +130,4 @@ Follow this simple branching strategy:
 - `npm run dev --prefix frontend`: Starts the frontend development server.
 - `npx hardhat node`: Starts the local blockchain simulation.
 - `npx hardhat run <script> --network localhost`: Executes a script on the local network.
+- `node static-analysis/programFlowAnalyzer.js [path]`: Runs the static program-flow analyzer. Omit `path` to scan everything under `contracts/`, or pass a specific file/folder to narrow the scope.
