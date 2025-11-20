@@ -21,4 +21,9 @@ contract SC08_IntegerOverflowAndUnderflow_Vulnerable {
             balance -= value; // Vulnerable to underflow
         }
     }
+
+    // Explicit getter to avoid ambiguity
+    function getBalance() public view returns (uint8) {
+        return balance;
+    }
 }
