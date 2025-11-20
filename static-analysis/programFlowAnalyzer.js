@@ -204,6 +204,13 @@ function analyzeFunction(fnNode, source, ownerVars) {
     return regex.test(snippet);
   });
 
+  const parameters =
+    fnNode.parameters?.parameters?.map((param) => ({
+      name: param.name,
+      type: param.typeDescriptions?.typeString || "",
+    })) || [];
+
+  const flowAnalysis = analyzeFlow(snippet, parameters);
   const sensitiveOperations = extractSensitiveOperations(snippet);
   const stateMutation =
     fnNode.stateMutability !== "view" &&
@@ -219,15 +226,102 @@ function analyzeFunction(fnNode, source, ownerVars) {
     entryPoint,
     snippet,
     src: fnNode.src,
+    parameters,
     sensitiveOperations,
     stateMutation: Boolean(stateMutation),
     hasAccessControl,
+    flowAnalysis,
     accessControlHints: {
       usesOwnerModifier,
       hasOwnerRequire,
       ownerVars,
     },
   };
+}
+
+function analyzeFlow(snippet, parameters) {
+  const flow = {
+    hasUncheckedBlock: false,
+    uncheckedWithArithmetic: false,
+    arithmeticOps: [],
+    externalCallsBeforeState: false,
+    hasInputValidation: {},
+    parameterUsage: {},
+  };
+
+  const uncheckedBlockRegex = /unchecked\s*\{([^}]*)\}/gs;
+  const uncheckedMatches = [...snippet.matchAll(uncheckedBlockRegex)];
+  if (uncheckedMatches.length > 0) {
+    flow.hasUncheckedBlock = true;
+    uncheckedMatches.forEach((match) => {
+      const uncheckedContent = match[1];
+      if (uncheckedContent.match(/(\+\+|\-\-|\+=|\-=|\*=|\/=|\+\s+|\-\s+|=\s*\w+\s*[\+\-])/)) {
+        flow.uncheckedWithArithmetic = true;
+        const arithMatches = uncheckedContent.match(/(\w+\s*[\+\-\*\/]=|\w+\+\+|\w+\-\-|\w+\s*[\+\-]\s*\w+)/g);
+        if (arithMatches) {
+          flow.arithmeticOps.push(...arithMatches.map((op) => ({ operation: op.trim(), inUnchecked: true })));
+        }
+      }
+    });
+  }
+
+  const normalArithRegex = /(\w+\s*[\+\-\*\/]=|\w+\+\+|\w+\-\-)/g;
+  const normalMatches = [...snippet.matchAll(normalArithRegex)];
+  normalMatches.forEach((match) => {
+    const op = match[0];
+    const opIndex = snippet.indexOf(op);
+    const beforeOp = snippet.slice(0, opIndex);
+    const uncheckedBlockStartsBefore = [...beforeOp.matchAll(/unchecked\s*\{/g)].length;
+    const uncheckedBlockEndsBefore = [...beforeOp.matchAll(/\}/g)].length;
+    const isInUnchecked = uncheckedBlockStartsBefore > uncheckedBlockEndsBefore;
+    if (!isInUnchecked) {
+      flow.arithmeticOps.push({ operation: op.trim(), inUnchecked: false });
+    }
+  });
+
+  parameters.forEach((param) => {
+    const paramName = param.name;
+    if (!paramName) return;
+    const paramUsed = new RegExp(`\\b${paramName}\\b`).test(snippet);
+    flow.parameterUsage[paramName] = paramUsed;
+
+    if (paramUsed) {
+      const paramValidationPatterns = [
+          new RegExp(`require\\s*\\([^)]*${paramName}[^)]*!=\\s*address\\(0\\)[^)]*\\)`, "i"),
+          new RegExp(`require\\s*\\([^)]*${paramName}[^)]*!=.*0x0[^)]*\\)`, "i"),
+          new RegExp(`require\\s*\\([^)]*${paramName}[^)]*>\\s*0[^)]*\\)`, "i"),
+          new RegExp(`require\\s*\\([^)]*${paramName}[^)]*[<>=][^)]*\\)`, "i"),
+          new RegExp(`require\\s*\\([^)]*${paramName}[^)]*<\\s*\\w+\\.length[^)]*\\)`, "i"),
+      ];
+  
+      // NEW LOGIC:
+      // Validation can appear anywhere in the function body
+      const hasValidation = paramValidationPatterns.some((pattern) => pattern.test(snippet));
+  
+      flow.hasInputValidation[paramName] = hasValidation;
+   }
+  
+  });
+
+  const externalCallPattern = /(\.call\{|\.call\.|\.transfer\(|\.send\(|\.delegatecall\()/g;
+  const stateMutationPattern = /(\w+\s*=\s*[^;]+;|\w+\s*[\+\-\*\/]=[^;]+;|\w+\+\+|\w+\-\-)/g;
+
+  const callMatches = [...snippet.matchAll(externalCallPattern)];
+  const mutationMatches = [...snippet.matchAll(stateMutationPattern)];
+
+  if (callMatches.length && mutationMatches.length) {
+    callMatches.forEach((callMatch) => {
+      const callIndex = callMatch.index;
+      mutationMatches.forEach((mutationMatch) => {
+        const mutationIndex = mutationMatch.index;
+        if (callIndex < mutationIndex) {
+          flow.externalCallsBeforeState = true;
+        }
+      });
+    });
+  }
+
+  return flow;
 }
 
 function extractSensitiveOperations(snippet) {
@@ -257,6 +351,7 @@ function detectVulnerabilities(functionReport, filePath) {
   }
 
   const location = formatLocation(functionReport.src, filePath);
+  const flow = functionReport.flowAnalysis || {};
 
   if ((functionReport.stateMutation || functionReport.sensitiveOperations.length) && !functionReport.hasAccessControl) {
     vulnerabilities.push({
@@ -288,6 +383,57 @@ function detectVulnerabilities(functionReport, filePath) {
       message: "Delegatecall introduces code execution risk. Ensure strict target validation and access control.",
       function: functionReport.name,
       location,
+    });
+  }
+
+  if (flow.uncheckedWithArithmetic) {
+    const operations = flow.arithmeticOps.filter((op) => op.inUnchecked).map((op) => op.operation);
+    vulnerabilities.push({
+      type: "INTEGER_OVERFLOW_UNDERFLOW",
+      message: "Arithmetic inside unchecked block can overflow/underflow.",
+      function: functionReport.name,
+      location,
+      details: `Unchecked operations: ${operations.join(", ")}`,
+    });
+  }
+
+  functionReport.parameters?.forEach((param) => {
+    const paramName = param.name;
+    if (!paramName) return;
+    const isUsed = flow.parameterUsage?.[paramName];
+    const hasValidation = flow.hasInputValidation?.[paramName];
+    if (isUsed && !hasValidation) {
+      const paramType = param.type || "";
+      const needsZeroAddressCheck = paramType.includes("address");
+      const needsValueCheck = paramType.includes("uint") || paramType.includes("int");
+
+      if (needsZeroAddressCheck) {
+        vulnerabilities.push({
+          type: "LACK_OF_INPUT_VALIDATION",
+          message: `Address parameter '${paramName}' is used without zero-address validation.`,
+          function: functionReport.name,
+          location,
+          details: `Parameter '${paramName}' (${paramType}) feeds state/sensitive ops without require(address != 0).`,
+        });
+      } else if (needsValueCheck && functionReport.stateMutation) {
+        vulnerabilities.push({
+          type: "LACK_OF_INPUT_VALIDATION",
+          message: `Numeric parameter '${paramName}' lacks bounds checking before state mutation.`,
+          function: functionReport.name,
+          location,
+          details: `Parameter '${paramName}' (${paramType}) should be range-checked before updating state.`,
+        });
+      }
+    }
+  });
+
+  if (flow.externalCallsBeforeState && hasExternalValueTransfer) {
+    vulnerabilities.push({
+      type: "REENTRANCY",
+      message: "External call occurs before state update (Checks-Effects-Interactions violation).",
+      function: functionReport.name,
+      location,
+      details: "Update contract state before external calls to prevent reentrancy.",
     });
   }
 
@@ -337,6 +483,9 @@ function renderContractReport(report) {
         console.log(
           `            Sensitive ops: ${vuln.sensitiveOperations.map((op) => op.detail || op.type).join(", ")}`
         );
+      }
+      if (vuln.details) {
+        console.log(`            Details: ${vuln.details}`);
       }
     });
   }

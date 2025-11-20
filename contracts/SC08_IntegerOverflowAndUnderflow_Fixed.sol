@@ -7,21 +7,24 @@ contract SC08_IntegerOverflowAndUnderflow_Fixed is Ownable {
     uint8 public balance;
 
     constructor() Ownable(msg.sender) {
-        balance = 255; // Maximum value of uint8
+        balance = type(uint8).max; // 255
     }
 
-    // Increments the balance by a given value
+    // Increments the balance by a given value with explicit bound checking
     function increment(uint8 value) public onlyOwner {
-        // In Solidity 0.8+, overflow is automatically checked.
-        // To demonstrate the fix, we can use an unchecked block
-        // for the vulnerable part and show the correct behavior here.
-        // However, for clarity, we will rely on the default behavior.
+        require(value > 0, "Value must be greater than zero");
+
+        // Explicit input bound that static analyzers want
+        require(value <= type(uint8).max - balance,"Value too large: overflow would occur");
         balance += value;
     }
 
-    // Decrements the balance by a given value
+    // Decrements the balance by a given value with explicit bound checking
     function decrement(uint8 value) public onlyOwner {
-        require(balance >= value, "Underflow detected");
+        require(value > 0, "Value must be greater than zero");
+        // Explicit input bound
+        require(value <= balance, "Value too large: underflow would occur");
+
         balance -= value;
     }
 }
