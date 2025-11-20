@@ -40,7 +40,9 @@ function main() {
     process.exit(1);
   }
 
-  console.log("🔎 Program-Flow Static Analysis\n");
+  console.log(
+    "--- Program-Flow Static Analysis Report (programFlowAnalyzer.js) ---"
+  );
 
   files.forEach((filePath) => {
     try {
@@ -49,6 +51,7 @@ function main() {
       console.error(`\n❌ Failed to analyze ${filePath}: ${err.message}`);
     }
   });
+  console.log("\n\n--- End of Report ---");
 }
 
 function collectSolidityFiles(pathsInput) {
@@ -71,7 +74,13 @@ function analyzeFile(filePath) {
   const source = fs.readFileSync(filePath, "utf8");
   const ast = compileAndGetAst(filePath, source);
 
-  console.log(`📄 ${path.relative(process.cwd(), filePath)}`);
+  console.log(
+    `\n\n================================================================`
+  );
+  console.log(`📄 FILE: ${path.relative(process.cwd(), filePath)}`);
+  console.log(
+    `================================================================`
+  );
 
   const contracts = ast.nodes.filter((node) => node.nodeType === "ContractDefinition");
   if (contracts.length === 0) {
@@ -151,37 +160,35 @@ function resolveImportPath(parentFile, dependencyPath) {
 
 function analyzeContract(contractNode, source, filePath) {
   const stateVariables = contractNode.nodes
-    .filter((node) => node.nodeType === "VariableDeclaration" && node.stateVariable)
+    .filter(
+      (node) => node.nodeType === "VariableDeclaration" && node.stateVariable
+    )
     .map((node) => ({
       name: node.name,
       type: node.typeDescriptions?.typeString || "",
-      isOwnerLike: OWNER_KEYWORDS.some((keyword) => node.name.toLowerCase().includes(keyword)),
+      isOwnerLike: OWNER_KEYWORDS.some((keyword) =>
+        node.name.toLowerCase().includes(keyword)
+      ),
     }));
 
-  const ownerVars = stateVariables.filter((v) => v.isOwnerLike).map((v) => v.name);
+  const ownerVars = stateVariables
+    .filter((v) => v.isOwnerLike)
+    .map((v) => v.name);
 
   const functions = contractNode.nodes.filter(
     (node) =>
       node.nodeType === "FunctionDefinition" &&
       node.implemented &&
-      node.kind !== "constructor" &&
-      node.kind !== "fallback" &&
-      node.kind !== "receive"
+      node.kind !== "constructor"
   );
 
-  const specialFunctions = contractNode.nodes.filter(
-    (node) =>
-      node.nodeType === "FunctionDefinition" &&
-      node.implemented &&
-      (node.kind === "fallback" || node.kind === "receive")
+  const functionReports = functions.map((fn) =>
+    analyzeFunction(fn, source, ownerVars)
   );
 
-  const functionReports = [
-    ...functions.map((fn) => analyzeFunction(fn, source, ownerVars)),
-    ...specialFunctions.map((fn) => analyzeFunction(fn, source, ownerVars)),
-  ];
-
-  const vulnerabilities = functionReports.flatMap((report) => detectVulnerabilities(report, filePath));
+  const vulnerabilities = functionReports.flatMap((report) =>
+    detectVulnerabilities(report, filePath, source)
+  );
 
   return {
     name: contractNode.name,
@@ -213,7 +220,9 @@ function analyzeFunction(fnNode, source, ownerVars) {
   const hasAccessControl = usesOwnerModifier || hasOwnerRequire;
 
   return {
-    name: fnNode.name || (fnNode.kind === "receive" ? "receive" : fnNode.kind || "anonymous"),
+    name:
+      fnNode.name ||
+      (fnNode.kind === "receive" ? "receive" : fnNode.kind || "anonymous"),
     visibility: fnNode.visibility,
     mutability: fnNode.stateMutability,
     entryPoint,
@@ -233,12 +242,32 @@ function analyzeFunction(fnNode, source, ownerVars) {
 function extractSensitiveOperations(snippet) {
   const operations = [];
   const patterns = [
-    { regex: /\.transfer\s*\(/g, type: "ETHER_TRANSFER", detail: "uses .transfer()" },
+    {
+      regex: /\.transfer\s*\(/g,
+      type: "ETHER_TRANSFER",
+      detail: "uses .transfer()",
+    },
     { regex: /\.send\s*\(/g, type: "ETHER_TRANSFER", detail: "uses .send()" },
-    { regex: /\.call\{[^}]*value/gs, type: "EXTERNAL_CALL", detail: "uses low-level call with value" },
-    { regex: /\.call\.value/gs, type: "EXTERNAL_CALL", detail: "uses .call.value()" },
-    { regex: /\.delegatecall\s*\(/g, type: "DELEGATECALL", detail: "uses delegatecall" },
-    { regex: /selfdestruct\s*\(/g, type: "SELFDESTRUCT", detail: "can destroy contract" },
+    {
+      regex: /\.call\{[^}]*value/gs,
+      type: "EXTERNAL_CALL",
+      detail: "uses low-level call with value",
+    },
+    {
+      regex: /\.call\.value/gs,
+      type: "EXTERNAL_CALL",
+      detail: "uses .call.value()",
+    },
+    {
+      regex: /\.delegatecall\s*\(/g,
+      type: "DELEGATECALL",
+      detail: "uses delegatecall",
+    },
+    {
+      regex: /selfdestruct\s*\(/g,
+      type: "SELFDESTRUCT",
+      detail: "can destroy contract",
+    },
   ];
 
   patterns.forEach(({ regex, type, detail }) => {
@@ -250,21 +279,35 @@ function extractSensitiveOperations(snippet) {
   return operations;
 }
 
-function detectVulnerabilities(functionReport, filePath) {
+function detectVulnerabilities(functionReport, filePath, source) {
   const vulnerabilities = [];
   if (!functionReport.entryPoint) {
     return vulnerabilities;
   }
 
-  const location = formatLocation(functionReport.src, filePath);
+  const { line, column, code } = formatLocation(
+    functionReport.src,
+    filePath,
+    source
+  );
 
-  if ((functionReport.stateMutation || functionReport.sensitiveOperations.length) && !functionReport.hasAccessControl) {
+  if (
+    (functionReport.stateMutation ||
+      functionReport.sensitiveOperations.length) &&
+    !functionReport.hasAccessControl
+  ) {
     vulnerabilities.push({
-      type: "UNRESTRICTED_ENTRY_POINT",
-      message: "Public/external function mutates state or performs sensitive operations without access control.",
+      id: "UNRESTRICTED_ENTRY_POINT",
+      title: "Unrestricted State-Changing Entry Point",
+      description:
+        "A public/external function that modifies contract state or performs a sensitive action lacks access control, allowing any user to call it.",
+      remediation:
+        "Implement `onlyOwner` or role-based modifiers, or add `require` checks to validate `msg.sender`.",
       function: functionReport.name,
-      location,
-      sensitiveOperations: functionReport.sensitiveOperations,
+      line,
+      column,
+      code,
+      severity: "High",
     });
   }
 
@@ -273,32 +316,30 @@ function detectVulnerabilities(functionReport, filePath) {
   );
   if (hasExternalValueTransfer && !functionReport.hasAccessControl) {
     vulnerabilities.push({
-      type: "UNGUARDED_ETHER_FLOW",
-      message: "Funds can be moved to arbitrary callers without any authorization checks.",
+      id: "UNGUARDED_ETHER_FLOW",
+      title: "Unguarded Ether/Token Flow",
+      description: `This function moves funds but does not verify the caller's authorization, creating a risk of fund theft.`,
+      remediation:
+        "Ensure all fund-transferring functions are protected with strong access control.",
       function: functionReport.name,
-      location,
-      sensitiveOperations: functionReport.sensitiveOperations,
+      line,
+      column,
+      code,
+      severity: "Critical",
     });
   }
 
-  const hasDelegateCall = functionReport.sensitiveOperations.some((op) => op.type === "DELEGATECALL");
-  if (hasDelegateCall) {
-    vulnerabilities.push({
-      type: "DELEGATECALL_RISK",
-      message: "Delegatecall introduces code execution risk. Ensure strict target validation and access control.",
-      function: functionReport.name,
-      location,
-    });
-  }
-
-  return vulnerabilities;
+  // Deduplicate
+  return vulnerabilities.filter(
+    (v, i, a) => a.findIndex((t) => t.line === v.line && t.id === v.id) === i
+  );
 }
 
-function formatLocation(src, filePath) {
+function formatLocation(src, filePath, source) {
   const { start } = parseSrc(src);
-  const source = fs.readFileSync(filePath, "utf8");
   const { line, column } = getLineAndColumn(source, start);
-  return `${path.relative(process.cwd(), filePath)}:${line}:${column}`;
+  const code = source.split("\n")[line - 1].trim();
+  return { line, column, code };
 }
 
 function parseSrc(src) {
@@ -316,28 +357,31 @@ function getLineAndColumn(source, startIndex) {
 }
 
 function renderContractReport(report) {
-  console.log(`\n   🏛️  Contract: ${report.name}`);
+  console.log(`\n  --------------------------------------------------`);
+  console.log(`  🏛️  CONTRACT: ${report.name}`);
+  console.log(`  --------------------------------------------------`);
   if (report.stateVariables.length) {
     console.log(
-      `      State vars: ${report.stateVariables
+      `     - State Variables: ${report.stateVariables
         .map((v) => `${v.name}${v.isOwnerLike ? " (owner-like)" : ""}`)
         .join(", ")}`
     );
   }
 
   if (report.vulnerabilities.length === 0) {
-    console.log("      ✅ No obvious entry-point flow issues detected.");
+    console.log(`\n     ✅ No obvious control-flow vulnerabilities detected.`);
   } else {
-    console.log("      ⚠️  Potential vulnerabilities:");
-    report.vulnerabilities.forEach((vuln, idx) => {
-      console.log(`         ${idx + 1}. [${vuln.type}] ${vuln.message}`);
-      console.log(`            Function: ${vuln.function}`);
-      console.log(`            Location: ${vuln.location}`);
-      if (vuln.sensitiveOperations?.length) {
-        console.log(
-          `            Sensitive ops: ${vuln.sensitiveOperations.map((op) => op.detail || op.type).join(", ")}`
-        );
-      }
+    console.log(`\n     🚨 VULNERABILITIES FOUND:`);
+    report.vulnerabilities.forEach((vuln) => {
+      console.log(`\n       ...................................`);
+      console.log(`       - ID:          [${vuln.id}]`);
+      console.log(`       - Severity:    ${vuln.severity}`);
+      console.log(`       - Title:       ${vuln.title}`);
+      console.log(`       - Function:    ${vuln.function}`);
+      console.log(`       - Location:    Line ${vuln.line}`);
+      console.log(`       - Code:        \`${vuln.code}\``);
+      console.log(`       - Description: ${vuln.description}`);
+      console.log(`       - Suggestion:  ${vuln.remediation}`);
     });
   }
 }
